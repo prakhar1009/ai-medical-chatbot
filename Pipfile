@@ -7,10 +7,20 @@ name = "pypi"
 langchain = "*"
 langchain-community = "*"
 langchain-huggingface = "*"
+langchain-openai = "*"
 faiss-cpu = "*"
 pypdf = "*"
 certifi = "*"
-
+streamlit = ">=1.24.0"
+pandas = "*"
+matplotlib = "*"
+pillow = "*"
+requests = "*"
+python-dotenv = "*"
+sentence-transformers = "*"
+transformers = "*"
+torch = "*"
+huggingface-hub = "*"
 
 [dev-packages]
 

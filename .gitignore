@@ -1,1 +1,67 @@
+# Environment variables
 .env
+
+# Python virtual environments
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# User data and chat history
+vectorstore/user_db.json
+vectorstore/chat_history/
+
+# Large files
+*.hdf5
+*.h5
+*.pkl
+*.model
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Local development settings
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Streamlit specific
+.streamlit/
+
+# Keep vector database structure but not the files
+vectorstore/db_faiss/*
+!vectorstore/db_faiss/.gitkeep

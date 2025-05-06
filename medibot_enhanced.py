@@ -10,32 +10,102 @@ import time
 from PIL import Image
 from io import BytesIO
 import requests
-from typing import Optional
+from typing import Optional, List, Dict, Any
+from dotenv import load_dotenv, find_dotenv
 
-# Gemini fallback function
-def call_gemini_api(user_question: str, gemini_api_key: Optional[str] = None) -> str:
+# Load environment variables from .env file
+load_dotenv(find_dotenv())
+
+# Check if GEMINI_API_KEY is available
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+# Gemini API integration
+def call_gemini_api(user_question: str, gemini_api_key: Optional[str] = None, history: Optional[List[Dict[str, Any]]] = None) -> str:
     """
-    Calls Gemini API with a strict, fact-based, medical-only prompt. If the question is not medical, Gemini should reply with a guidance message.
+    Calls Gemini API with a medical prompt and conversation history.
     """
     if gemini_api_key is None:
-        gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_api_key}"
+        # Use the global GEMINI_API_KEY variable
+        gemini_api_key = GEMINI_API_KEY
+        
+        # Check if key exists and is not empty
+        if not gemini_api_key:
+            return "❌ Error: Gemini API key not found. Please add your GEMINI_API_KEY to the .env file. See the sample.env file for reference."
+    
+    # Use the model name parameter if provided, otherwise use a default
+    # We'll get the actual model from session state when the function is called from within the app
+    model_name = "gemini-pro"  # Default fallback model
+    
+    # Use the correct API endpoint format for the selected model
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
+    
+    # Convert message history to Gemini format
+    gemini_messages = []
+    if history:
+        for msg in history[-10:]:  # Only use last 10 messages for context
+            role = "user" if msg["role"] == "user" else "model"
+            gemini_messages.append({
+                "role": role,
+                "parts": [{"text": msg["content"]}]
+            })
+    
+    # Add the current question
+    gemini_messages.append({
+        "role": "user",
+        "parts": [{"text": user_question}]
+    })
+    
     # Strong anti-hallucination, medical-only prompt
-    gemini_prompt = f"""
-    You are a highly reliable medical assistant. ONLY answer questions that are strictly related to medical, healthcare, or scientific reference topics. If the user's question is not related to medicine, healthcare, or scientific reference, do not answer it—instead, politely tell the user: 'This application only answers medical or healthcare-related questions based on trusted references. Please ask a relevant question.'
+    system_prompt = """
+    You are MediBot, a highly reliable medical assistant. ONLY answer questions that are strictly related to medical, healthcare, or scientific reference topics. 
+    If the user's question is not related to medicine, healthcare, or scientific reference, politely tell the user: 
+    'This application only answers medical or healthcare-related questions based on trusted references. Please ask a relevant question.'
     
-    When you answer, use only factual, verifiable, and up-to-date information. NEVER make up facts or hallucinate. If you are unsure or cannot answer factually, respond: 'I do not know the answer to that based on trusted medical sources.'
+    When you answer, use only factual, verifiable, and up-to-date information. NEVER make up facts or hallucinate. 
+    If you are unsure or cannot answer factually, respond: 'I do not know the answer to that based on trusted medical sources.'
     
-    User's question: {user_question}
+    Format your responses in markdown for better readability. Use bullet points, headers, and emphasis where appropriate.
     """
+    
     headers = {"Content-Type": "application/json"}
     payload = {
-        "contents": [{"parts": [{"text": gemini_prompt}]}]
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": system_prompt}]
+            }
+        ] + gemini_messages,
+        "generationConfig": {
+            "temperature": 0.4,
+            "topP": 0.95,
+            "topK": 40,
+            "maxOutputTokens": 2048
+        },
+        "safetySettings": [
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            }
+        ]
     }
+    
     try:
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
+        
         # Gemini returns candidates list
         if "candidates" in data and data["candidates"]:
             return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -49,15 +119,15 @@ from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_huggingface import HuggingFaceEndpoint
-from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import LLMChainExtractor
+from langchain_google_genai import ChatGoogleGenerativeAI  # Added for Gemini integration
 
 ## Uncomment the following files if you're not using pipenv as your virtual environment manager
-#from dotenv import load_dotenv, find_dotenv
-#load_dotenv(find_dotenv())
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
 
 # Constants
 DB_FAISS_PATH = "vectorstore/db_faiss"
@@ -66,9 +136,10 @@ CHAT_HISTORY_PATH = "vectorstore/chat_history"
 
 # Available models
 MODELS = {
+    "Gemini Pro": "gemini-pro",
+    "Gemini Flash": "gemini-2.0-flash",
     "Mistral-7B": "mistralai/Mistral-7B-Instruct-v0.3",
-    "Llama-2-7B": "meta-llama/Llama-2-7b-chat-hf",
-    "GPT-3.5": "openai/gpt-3.5-turbo"
+    "Llama-2-7B": "meta-llama/Llama-2-7b-chat-hf"
 }
 
 # Medical entity categories for extraction
@@ -151,13 +222,14 @@ def load_chat_history(username):
 def load_llm(model_name, temperature=0.5, max_length=512):
     """Load language model based on selection"""
     HF_TOKEN = os.environ.get("HF_TOKEN")
-    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
     
-    if "openai" in model_name.lower():
-        return ChatOpenAI(
-            model_name=model_name.split('/')[-1],
+    if "gemini" in model_name.lower():
+        return ChatGoogleGenerativeAI(
+            model=model_name,
             temperature=temperature,
-            openai_api_key=OPENAI_API_KEY
+            google_api_key=GEMINI_API_KEY,
+            convert_system_message_to_human=True
         )
     else:
         return HuggingFaceEndpoint(
@@ -209,33 +281,206 @@ def extract_medical_entities(text, llm):
         print(f"Error extracting entities: {e}")
         return {}
 
+# Function to display suggested questions
+def display_suggested_questions():
+    st.markdown("### Start with a question:")
+    
+    # Custom CSS for better-looking suggestion buttons
+    st.markdown("""
+    <style>
+    div.stButton > button {
+        width: 100%;
+        height: auto;
+        padding: 15px;
+        text-align: left;
+        background-color: #2d2d2d;
+        color: white;
+        border: none;
+        border-radius: 10px;
+        margin: 5px 0;
+    }
+    div.stButton > button:hover {
+        background-color: #3d3d3d;
+        border-left: 4px solid #4a6bdf;
+    }
+    div.stButton > button p {
+        font-size: 16px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    suggestions = [
+        {"icon": "🩺", "text": "What are the symptoms of diabetes?", "color": "#4a6bdf"},
+        {"icon": "💊", "text": "How do antibiotics work?", "color": "#28a745"},
+        {"icon": "🧠", "text": "Explain how vaccines prevent disease", "color": "#dc3545"},
+        {"icon": "❤️", "text": "What causes high blood pressure?", "color": "#fd7e14"}
+    ]
+    
+    cols = st.columns(2)
+    for idx, suggestion in enumerate(suggestions):
+        with cols[idx % 2]:
+            button_label = f"{suggestion['icon']}  {suggestion['text']}"
+            if st.button(button_label, key=f"suggestion_{idx}"):
+                st.session_state["chat_input"] = suggestion['text']
+                st.session_state["suggestion_triggered"] = True
+                # Force a rerun to immediately process the suggestion
+                st.experimental_rerun()
+
+# Helper to process suggestion click
+def process_suggestion():
+    if st.session_state.get("suggestion_triggered", False):
+        # Get the suggested question from session state
+        prompt = st.session_state.get("chat_input", "")
+        if prompt:
+            # Add user message to chat
+            st.chat_message("user").markdown(prompt)
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            # Process the suggestion as a user input
+            process_user_input(prompt)
+            
+        # Reset the suggestion trigger
+        st.session_state["suggestion_triggered"] = False
+        
+# Helper to process user input (used by both direct input and suggestions)
+def process_user_input(prompt):
+    # Display assistant "thinking" message
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.markdown("🤔 Thinking...")
+        
+        try:
+            # Get selected model
+            model_name = MODELS[st.session_state.current_model]
+            
+            # For Gemini models, use direct API call
+            if "gemini" in model_name.lower():
+                # Get chat history for context
+                history = [msg for msg in st.session_state.messages[:-1]]  # Exclude the most recent user message
+                
+                # Call Gemini API
+                result = call_gemini_api(prompt, GEMINI_API_KEY, history)
+                
+                # Extract medical entities if enabled
+                entities = {}
+                if st.session_state.extract_entities:
+                    # Load LLM for entity extraction
+                    llm = load_llm(model_name, st.session_state.temperature)
+                    entities = extract_medical_entities(result, llm)
+                
+                # Update placeholder with result
+                message_placeholder.markdown(result)
+                
+                # Add assistant message to chat history
+                assistant_message = {
+                    "role": "assistant", 
+                    "content": result,
+                    "entities": entities
+                }
+                st.session_state.messages.append(assistant_message)
+                
+                # Save chat history
+                save_chat_history(st.session_state.username, st.session_state.messages)
+            
+            # For other models, use RAG with LangChain
+            else:
+                # Get vectorstore
+                vectorstore = get_vectorstore()
+                
+                # Load LLM
+                llm = load_llm(model_name, st.session_state.temperature)
+                
+                # Create retriever based on settings
+                if st.session_state.use_advanced_rag:
+                    retriever = get_advanced_retriever(vectorstore, llm)
+                else:
+                    retriever = vectorstore.as_retriever(search_kwargs={'k': 3})
+                
+                # Set up custom prompt template
+                template = """Use the following pieces of context to answer the question at the end. 
+                If you don't know the answer, just say that you don't know, don't try to make up an answer.
+                Always cite your sources by indicating which document (Doc 1, Doc 2, etc.) contains the information.
+                
+                {context}
+                
+                Question: {question}
+                
+                Answer in a detailed, medically accurate way:"""
+                
+                # Create QA chain
+                qa_chain = (
+                    {"context": retriever, "question": RunnablePassthrough()}
+                    | set_custom_prompt(template)
+                    | llm
+                    | StrOutputParser()
+                )
+                
+                # Run chain
+                result = qa_chain.invoke(prompt)
+                
+                # Extract medical entities if enabled
+                entities = {}
+                if st.session_state.extract_entities:
+                    entities = extract_medical_entities(result, llm)
+                
+                # Update placeholder with result
+                message_placeholder.markdown(result)
+                
+                # Add assistant message to chat history
+                assistant_message = {
+                    "role": "assistant", 
+                    "content": result,
+                    "entities": entities
+                }
+                st.session_state.messages.append(assistant_message)
+                
+                # Save chat history
+                save_chat_history(st.session_state.username, st.session_state.messages)
+        
+        except Exception as e:
+            error_message = f"Error: {str(e)}"
+            message_placeholder.markdown(error_message)
+            st.session_state.messages.append({"role": "assistant", "content": error_message})
+            save_chat_history(st.session_state.username, st.session_state.messages)
+
 def main():
     # Page configuration and styling
     st.set_page_config(page_title="MediBot - Advanced Medical Assistant", page_icon="💊", layout="wide")
+
+    # Warn if GEMINI_API_KEY is missing
+    if not os.environ.get("GEMINI_API_KEY"):
+        st.warning("GEMINI_API_KEY is missing. Please set it in your .env file or environment variables.")
     
-    # Apply custom CSS for medical theme
+    # Apply custom CSS for modern theme (similar to financial assistant)
     st.markdown("""
     <style>
-    /* Main app theme */
-    .main {background-color: #f0f8ff;}
-    .stApp {background-color: #f0f8ff;}
+    /* Main app theme - dark mode */
+    .main {background-color: #121212;}
+    .stApp {background-color: #121212; color: #ffffff;}
     
     /* Input fields styling */
-    .stTextInput>div>div>input {background-color: #ffffff; color: #000000; border: 2px solid #1e90ff; border-radius: 5px; padding: 8px 12px;}
-    .stTextInput>label {font-weight: bold; color: #0066cc;}
+    .stTextInput>div>div>input {background-color: #2d2d2d; color: #ffffff; border: 1px solid #444444; border-radius: 8px; padding: 10px 14px;}
+    .stTextInput>label {font-weight: bold; color: #ffffff;}
     
     /* Button styling */
-    .stButton>button {background-color: #1e90ff; color: white; font-weight: bold; border-radius: 5px; padding: 8px 16px; transition: all 0.3s;}
-    .stButton>button:hover {background-color: #0056b3; transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.1);}
+    .stButton>button {background-color: #4a6bdf; color: white; font-weight: bold; border-radius: 8px; padding: 10px 18px; transition: all 0.3s;}
+    .stButton>button:hover {background-color: #3a5bcf; transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2);}
     
     /* Sidebar styling */
-    .stSidebar {background-color: #e6f2ff;}
-    .css-1d391kg {background-color: #e6f2ff;}
+    .stSidebar {background-color: #1e1e1e;}
     
     /* Headings */
-    h1 {color: #0066cc; font-weight: bold; text-shadow: 1px 1px 2px rgba(0,0,0,0.1);}
-    h2 {color: #0066cc; font-weight: bold;}
-    h3 {color: #0066cc;}
+    h1 {color: #ffffff; font-weight: bold; text-shadow: 1px 1px 2px rgba(0,0,0,0.2);}
+    h2 {color: #ffffff; font-weight: bold;}
+    h3 {color: #ffffff;}
+    
+    /* Chat container styling */
+    .chat-container {max-width: 800px; margin: 0 auto;}
+    
+    /* Message styling */
+    .stChatMessage {border-radius: 15px; margin-bottom: 10px;}
+    .stChatMessage.user {background-color: #4a6bdf;}
+    .stChatMessage.assistant {background-color: #2d2d2d;}
     
     /* Login/Register container styling */
     .auth-container {background-color: #1a1a1a; border-radius: 10px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 500px; margin: 0 auto;}
@@ -247,6 +492,10 @@ def main():
     .auth-message {padding: 10px; border-radius: 5px; margin-top: 10px;}
     .auth-success {background-color: rgba(40, 167, 69, 0.2); border: 1px solid #28a745; color: #28a745;}
     .auth-error {background-color: rgba(220, 53, 69, 0.2); border: 1px solid #dc3545; color: #dc3545;}
+    
+    /* Hide Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
     
@@ -258,7 +507,7 @@ def main():
     if 'messages' not in st.session_state:
         st.session_state.messages = []
     if 'current_model' not in st.session_state:
-        st.session_state.current_model = "Mistral-7B"
+        st.session_state.current_model = "Gemini Flash"
     if 'temperature' not in st.session_state:
         st.session_state.temperature = 0.5
     if 'show_sources' not in st.session_state:
@@ -399,7 +648,23 @@ def main():
                 st.experimental_rerun()
         
         # Main chat interface
-        st.markdown("<h1 style='text-align: center;'>🏥 MediBot - Advanced Medical Assistant</h1>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center;'>💊 MediBot - Advanced Medical Assistant</h1>", unsafe_allow_html=True)
+        
+        # Display logo with glowing effect
+        st.markdown("""
+        <div style="display: flex; justify-content: center; margin-bottom: 30px;">
+            <div style="background-color: #4a6bdf; width: 120px; height: 120px; border-radius: 50%; 
+            display: flex; justify-content: center; align-items: center; box-shadow: 0 0 30px #4a6bdf;">
+                <span style="font-size: 60px;">💊</span>
+            </div>
+        </div>
+        <h2 style="text-align: center; margin-bottom: 30px;">Your AI Medical Assistant</h2>
+        """, unsafe_allow_html=True)
+        
+        # If no messages yet, show suggested questions
+        if not st.session_state.messages:
+            display_suggested_questions()
+            process_suggestion()
         
         # Display chat messages
         for message in st.session_state.messages:
@@ -428,7 +693,7 @@ def main():
                         entity_counts = df['Type'].value_counts()
                         if not entity_counts.empty:
                             fig, ax = plt.subplots(figsize=(10, 5))
-                            entity_counts.plot(kind='bar', ax=ax, color='skyblue')
+                            entity_counts.plot(kind='bar', ax=ax, color='#4a6bdf')
                             plt.title('Medical Entity Distribution')
                             plt.xlabel('Entity Type')
                             plt.ylabel('Count')
@@ -444,144 +709,8 @@ def main():
             st.chat_message("user").markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
             
-            # Display assistant "thinking" message
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                message_placeholder.markdown("🤔 Thinking...")
-                
-                try:
-                    # Get selected model
-                    model_name = MODELS[st.session_state.current_model]
-                    
-                    # Load vectorstore
-                    vectorstore = get_vectorstore()
-                    if vectorstore is None:
-                        raise Exception("Failed to load the vector store")
-                    
-                    # Load LLM
-                    llm = load_llm(
-                        model_name=model_name,
-                        temperature=st.session_state.temperature
-                    )
-                    
-                    # Custom prompt template
-                    CUSTOM_PROMPT_TEMPLATE = """
-                    You are MediBot, an advanced medical assistant with expertise in healthcare and medicine.
-                    Use the pieces of information provided in the context to answer the user's question.
-                    If you don't know the answer, just say that you don't know, don't try to make up an answer.
-                    Only provide information that is supported by the given context.
-                    
-                    Context: {context}
-                    Question: {question}
-                    
-                    Start the answer directly. Be concise but thorough. Use medical terminology appropriately.
-                    """
-                    
-                    # Get retriever (basic or advanced)
-                    if st.session_state.use_advanced_rag:
-                        retriever = get_advanced_retriever(vectorstore, llm)
-                    else:
-                        retriever = vectorstore.as_retriever(search_kwargs={'k': 3})
-                    
-                    # Create QA chain
-                    qa_chain = RetrievalQA.from_chain_type(
-                        llm=llm,
-                        chain_type="stuff",
-                        retriever=retriever,
-                        return_source_documents=True,
-                        chain_type_kwargs={'prompt': set_custom_prompt(CUSTOM_PROMPT_TEMPLATE)}
-                    )
-                    
-                    # Get response
-                    start_time = time.time()
-                    response = qa_chain.invoke({"query": prompt})
-                    end_time = time.time()
-                    
-                    # Extract result and sources
-                    result = response["result"]
-                    source_documents = response["source_documents"]
-                    
-                    # Format source documents nicely
-                    sources_text = ""
-                    if st.session_state.show_sources and source_documents:
-                        sources_text = "\n\n**Sources:**\n"
-                        for i, doc in enumerate(source_documents):
-                            source = doc.metadata.get('source', 'Unknown')
-                            page = doc.metadata.get('page', 'Unknown')
-                            sources_text += f"- Source {i+1}: {os.path.basename(source)}, Page {page}\n"
-                    
-                    # Extract medical entities if enabled
-                    entities = {}
-                    if st.session_state.extract_entities:
-                        entities = extract_medical_entities(result, llm)
-                    
-                    # Compile final result
-                    result_to_show = f"{result}{sources_text}\n\n*Response time: {end_time - start_time:.2f} seconds*"
-
-                    # If RAG answer is empty, 'I do not know', or similar, use Gemini fallback
-                    fallback_phrases = [
-                        "i do not know", "don't know", "do not know", "sorry", "unable to answer", "cannot answer", "no answer", "not sure", "not found", "unknown", "n/a", "out of the given context"
-                    ]
-                    use_gemini = False
-                    if not result.strip() or any(phrase in result.lower() for phrase in fallback_phrases):
-                        use_gemini = True
-                    # If no source documents are found, also fallback
-                    if not source_documents:
-                        use_gemini = True
-                    if use_gemini:
-                        gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-                        gemini_response = call_gemini_api(prompt, gemini_api_key)
-                        result_to_show = f"{gemini_response}\n\n*Response from Gemini (fallback model)*"
-                        entities = extract_medical_entities(gemini_response, llm) if st.session_state.extract_entities else {}
-
-                    # Update placeholder with result
-                    message_placeholder.markdown(result_to_show)
-                    
-                    # Add assistant message to chat history
-                    assistant_message = {
-                        "role": "assistant", 
-                        "content": result_to_show,
-                        "entities": entities
-                    }
-                    st.session_state.messages.append(assistant_message)
-                    
-                    # Save chat history
-                    save_chat_history(st.session_state.username, st.session_state.messages)
-                    
-                    # Display entity visualization if entities were extracted
-                    if entities:
-                        st.divider()
-                        st.markdown("### 📊 Medical Entities Detected")
-                        
-                        # Create a DataFrame for visualization
-                        entity_data = []
-                        for entity_type, entity_list in entities.items():
-                            if entity_list:  # Only include non-empty entity types
-                                for entity in entity_list:
-                                    entity_data.append({"Type": entity_type, "Entity": entity})
-                        
-                        if entity_data:
-                            df = pd.DataFrame(entity_data)
-                            
-                            # Display as table
-                            st.dataframe(df, use_container_width=True)
-                            
-                            # Create a bar chart of entity counts
-                            entity_counts = df['Type'].value_counts()
-                            if not entity_counts.empty:
-                                fig, ax = plt.subplots(figsize=(10, 5))
-                                entity_counts.plot(kind='bar', ax=ax, color='skyblue')
-                                plt.title('Medical Entity Distribution')
-                                plt.xlabel('Entity Type')
-                                plt.ylabel('Count')
-                                plt.xticks(rotation=45)
-                                plt.tight_layout()
-                                st.pyplot(fig)
-                
-                except Exception as e:
-                    error_msg = f"Error: {str(e)}"
-                    message_placeholder.markdown(f"❌ {error_msg}")
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            # Process the user input
+            process_user_input(prompt)
 
 if __name__ == "__main__":
     main()
